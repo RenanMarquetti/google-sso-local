@@ -37,7 +37,7 @@ const args = (argv) => {
   return out;
 };
 
-const openssl = (...a) => execFileSync('openssl', a, { stdio: ['ignore', 'ignore', 'inherit'] });
+const openssl = (...a) => execFileSync('openssl', a, { stdio: ['ignore', 'ignore', 'pipe'] });
 
 const init = () => {
   if (fs.existsSync(file('ca.crt'))) {
