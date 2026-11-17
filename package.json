@@ -1,0 +1,11 @@
+{
+  "name": "google-sso-local",
+  "version": "0.1.0",
+  "description": "Answer Google ID-token verification from your own machine, for one process only: local SSO logins without a Google account and without changing the backend.",
+  "type": "module",
+  "license": "MIT",
+  "bin": { "google-sso-local": "bin/cli.mjs" },
+  "engines": { "node": ">=20" },
+  "scripts": { "test": "node test/verify.mjs" },
+  "devDependencies": { "google-auth-library": "11.0.2" }
+}
