@@ -33,7 +33,9 @@ The token has `iss=https://accounts.google.com`, `aud`/`azp`, `email_verified=tr
 a unique `jti` (backends that block replays accept each token once), and `local_sso=true` so it is easy to spot in logs.
 
 Served on the intercepted hosts: `/oauth2/v1/certs` (PEM, used by `google-auth-library`), `/oauth2/v3/certs` (JWKS),
-`/oauth2/v3/tokeninfo`.
+`/oauth2/v3/tokeninfo`. By default the key lists are **Google's real keys plus the local one** (fetched directly from
+Google, cached 5 min), so a real "Sign in with Google" keeps working in the same process. `proxy --only-local` serves
+only the local key.
 
 Other runtimes: Python `requests` honours `HTTPS_PROXY` and `REQUESTS_CA_BUNDLE`; Go honours `HTTPS_PROXY` and
 `SSL_CERT_FILE`. Check that `NO_PROXY` does not include `googleapis.com`.

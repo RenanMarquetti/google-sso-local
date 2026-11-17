@@ -2,6 +2,7 @@
 //  1. with HTTPS_PROXY + NODE_EXTRA_CA_CERTS -> the locally minted token is accepted (email, nonce, audience)
 //  2. a tampered token is rejected even with the proxy
 //  3. without the env vars (real Google) the same token is rejected
+//  4. the proxy serves Google's real keys too (real Google sign-ins keep working), plus the local one
 import { execFileSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -46,6 +47,13 @@ const b = verify(`${h}.${Buffer.from(JSON.stringify(forged)).toString('base64url
 if (b.ok) fails.push('2 tampered token was accepted');
 const c = verify(token, baseEnv);
 if (c.ok) fails.push('3 token accepted WITHOUT the proxy (should only work for the opted-in process)');
+const certsScript = `
+import { OAuth2Client } from 'google-auth-library';
+const { certs } = await new OAuth2Client().getFederatedSignonCertsAsync();
+console.log(JSON.stringify(Object.keys(certs)));`;
+const kids = JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e', certsScript], { env: viaProxy, cwd: root, timeout: 20000 }).toString());
+const localKid = JSON.parse(Buffer.from(h, 'base64url')).kid;
+if (!kids.includes(localKid) || kids.length < 2) fails.push(`4 certs via proxy should hold Google's keys + the local one: ${JSON.stringify(kids)}`);
 proxy.kill();
 fs.rmSync(home, { recursive: true, force: true });
 console.log(proxyLog.trim().split('\n').filter((l) => l.includes('GET')).slice(0, 2).join('\n'));
@@ -53,4 +61,5 @@ if (fails.length) {
   console.error(`FAIL\n${fails.join('\n')}`);
   process.exit(1);
 }
+console.log(`ok: certs via proxy = ${kids.length - 1} Google key(s) + local`);
 console.log(`ok: accepted via proxy (${a.out.email}, nonce ${a.out.nonce}); tampered rejected (${b.err ?? 'error'}); without proxy rejected (${c.err ?? 'error'})`);

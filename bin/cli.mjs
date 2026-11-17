@@ -2,7 +2,9 @@
 // google-sso-local: answer Google ID-token verification from this machine, for one process only.
 //
 //   google-sso-local init                         create the local CA, TLS cert and signing key (once)
-//   google-sso-local proxy [--port 8899]          start the proxy (127.0.0.1 only)
+//   google-sso-local proxy [--port 8899] [--only-local]
+//                                                 start the proxy (127.0.0.1 only); serves Google's real keys plus
+//                                                 the local one, so real Google sign-ins keep working (--only-local: just ours)
 //   google-sso-local env [--port 8899]            print the two env vars for the process that should trust it
 //   google-sso-local mint --email E --aud CLIENT_ID [--name N] [--nonce X] [--sub S] [--ttl 3600] [--hd D]
 //
@@ -14,6 +16,7 @@ import { execFileSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
+import https from 'node:https';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
@@ -28,8 +31,10 @@ const args = (argv) => {
   const out = { _: [] };
   for (let i = 0; i < argv.length; i += 1) {
     if (argv[i].startsWith('--')) {
-      out[argv[i].slice(2)] = argv[i + 1];
-      i += 1;
+      const next = argv[i + 1];
+      const isFlag = next === undefined || next.startsWith('--');
+      out[argv[i].slice(2)] = isFlag ? 'true' : next;
+      i += isFlag ? 0 : 1;
     } else {
       out._.push(argv[i]);
     }
@@ -99,7 +104,42 @@ const verifyOwn = (token) => {
   return ok ? JSON.parse(Buffer.from(p, 'base64url')) : null;
 };
 
-const googleApi = (req, res) => {
+const UPSTREAM_TTL_MS = 5 * 60 * 1000;
+const upstreamCache = new Map();
+
+const getUpstream = (pathAndQuery) =>
+  new Promise((resolve) => {
+    const req = https.get({ host: 'www.googleapis.com', path: pathAndQuery, timeout: 5000 }, (res) => {
+      let body = '';
+      res.setEncoding('utf8');
+      res.on('data', (d) => { body += d; });
+      res.on('end', () => {
+        try {
+          resolve({ status: res.statusCode, json: JSON.parse(body) });
+        } catch {
+          resolve(null);
+        }
+      });
+    });
+    req.on('timeout', () => req.destroy());
+    req.on('error', () => resolve(null));
+  });
+
+const upstreamCerts = async (pathname) => {
+  const hit = upstreamCache.get(pathname);
+  if (hit && Date.now() - hit.at < UPSTREAM_TTL_MS) return hit.json;
+  const res = await getUpstream(pathname);
+  if (res?.status !== 200) {
+    console.error(`[google-sso-local] could not fetch Google's ${pathname}; serving only the local key`);
+    return hit?.json ?? null;
+  }
+  upstreamCache.set(pathname, { at: Date.now(), json: res.json });
+  return res.json;
+};
+
+let onlyLocal = false;
+
+const googleApi = async (req, res) => {
   const { certPem, kid } = signing();
   const url = new URL(req.url, `https://${req.headers.host}`);
   const send = (code, body) => {
@@ -107,20 +147,28 @@ const googleApi = (req, res) => {
     res.end(JSON.stringify(body));
   };
   console.error(`[google-sso-local] ${req.method} https://${req.headers.host}${url.pathname}`);
-  if (url.pathname === '/oauth2/v1/certs') return send(200, { [kid]: certPem });
+  if (url.pathname === '/oauth2/v1/certs') {
+    const upstream = onlyLocal ? null : await upstreamCerts(url.pathname);
+    return send(200, { ...(upstream ?? {}), [kid]: certPem });
+  }
   if (url.pathname === '/oauth2/v3/certs') {
     const jwk = new crypto.X509Certificate(certPem).publicKey.export({ format: 'jwk' });
-    return send(200, { keys: [{ ...jwk, kid, alg: 'RS256', use: 'sig' }] });
+    const upstream = onlyLocal ? null : await upstreamCerts(url.pathname);
+    return send(200, { keys: [...(upstream?.keys ?? []), { ...jwk, kid, alg: 'RS256', use: 'sig' }] });
   }
   if (url.pathname === '/oauth2/v3/tokeninfo' || url.pathname === '/tokeninfo') {
     const claims = verifyOwn(url.searchParams.get('id_token') ?? '');
-    return claims ? send(200, { ...claims, alg: 'RS256', kid }) : send(400, { error: 'invalid_token' });
+    if (claims) return send(200, { ...claims, alg: 'RS256', kid });
+    if (onlyLocal) return send(400, { error: 'invalid_token' });
+    const upstream = await getUpstream(`/oauth2/v3/tokeninfo${url.search}`);
+    return send(upstream?.status ?? 502, upstream?.json ?? { error: 'upstream_unavailable' });
   }
   return send(404, { error: 'not served by google-sso-local', path: url.pathname });
 };
 
 const proxy = (o) => {
   const port = Number(o.port ?? 8899);
+  onlyLocal = o['only-local'] === 'true';
   const tlsOpts = { key: fs.readFileSync(file('tls.key')), cert: fs.readFileSync(file('tls.crt')) };
   const inner = http.createServer(googleApi);
   const server = http.createServer((_req, res) => {
@@ -146,7 +194,9 @@ const proxy = (o) => {
     upstream.on('error', () => client.destroy());
     client.on('error', () => upstream.destroy());
   });
-  server.listen(port, '127.0.0.1', () => console.error(`[google-sso-local] proxy on http://127.0.0.1:${port} (intercepts ${[...INTERCEPT].join(', ')})`));
+  server.listen(port, '127.0.0.1', () =>
+    console.error(`[google-sso-local] proxy on http://127.0.0.1:${port} (intercepts ${[...INTERCEPT].join(', ')}; ${onlyLocal ? 'local key only' : "Google's keys + local key"})`),
+  );
   return server;
 };
 
